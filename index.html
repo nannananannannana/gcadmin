@@ -18,7 +18,17 @@ body{font-family:Arial,sans-serif;background:#004837;color:#FFFFFF;min-height:10
 .mode-tab.active{background:#5FF49A;color:#004837;}
 .panel{display:none;flex-direction:column;gap:14px;}
 .panel.active{display:flex;}
-#scanner-video{width:100%;border-radius:14px;border:3px solid #5FF49A;background:#000;aspect-ratio:4/3;object-fit:cover;}
+.scan-area{position:relative;width:100%;border-radius:14px;overflow:hidden;border:3px solid #5FF49A;background:#000;}
+#scanner-video{width:100%;display:block;aspect-ratio:4/3;object-fit:cover;}
+#scanner-canvas{display:none;}
+.scan-overlay{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:180px;height:180px;border:3px solid #5FF49A;border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.3);pointer-events:none;}
+.scan-corner{position:absolute;width:20px;height:20px;border-color:#5FF49A;border-style:solid;}
+.sc-tl{top:-3px;left:-3px;border-width:4px 0 0 4px;border-radius:4px 0 0 0;}
+.sc-tr{top:-3px;right:-3px;border-width:4px 4px 0 0;border-radius:0 4px 0 0;}
+.sc-bl{bottom:-3px;left:-3px;border-width:0 0 4px 4px;border-radius:0 0 0 4px;}
+.sc-br{bottom:-3px;right:-3px;border-width:0 4px 4px 0;border-radius:0 0 4px 0;}
+.scan-line{position:absolute;top:0;left:10%;width:80%;height:2px;background:#5FF49A;box-shadow:0 0 8px #5FF49A;animation:scanLine 2s ease-in-out infinite;}
+@keyframes scanLine{0%{top:0}50%{top:100%}100%{top:0}}
 .scan-status{background:rgba(255,255,255,.06);border-radius:14px;padding:18px;text-align:center;}
 .scan-status .icon{font-size:40px;margin-bottom:6px;}
 .scan-status .msg{font-size:13px;font-weight:500;opacity:.7;}
@@ -84,6 +94,11 @@ body{font-family:Arial,sans-serif;background:#004837;color:#FFFFFF;min-height:10
 .pin-overlay .pin-note{font-size:11px;opacity:.4;margin-top:18px;max-width:260px;}
 .empty-msg{text-align:center;opacity:.35;padding:36px 0;font-size:13px;}
 @keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.upload-section{background:rgba(255,255,255,.06);border-radius:14px;padding:20px;text-align:center;}
+.upload-section p{font-size:13px;opacity:.7;margin-bottom:12px;}
+.btn-upload{background:#5FF49A;color:#004837;border:none;padding:14px 32px;border-radius:30px;font-family:inherit;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:8px;}
+.btn-upload-alt{background:rgba(255,255,255,.1);color:#FFFFFF;border:2px solid rgba(255,255,255,.2);padding:12px 28px;border-radius:30px;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;}
+#file-input{display:none;}
 </style>
 </head>
 <body>
@@ -108,10 +123,28 @@ body{font-family:Arial,sans-serif;background:#004837;color:#FFFFFF;min-height:10
 <button class="mode-tab" onclick="switchTab('analytics')">📊 Stats</button>
 </div>
 <div class="panel active" id="panel-scan">
-<video id="scanner-video" autoplay playsinline></video>
+<div class="scan-area">
+<video id="scanner-video" autoplay playsinline muted></video>
+<canvas id="scanner-canvas"></canvas>
+<div class="scan-overlay">
+<div class="scan-corner sc-tl"></div>
+<div class="scan-corner sc-tr"></div>
+<div class="scan-corner sc-bl"></div>
+<div class="scan-corner sc-br"></div>
+<div class="scan-line"></div>
+</div>
+</div>
 <div class="scan-status" id="scan-status">
 <div class="icon">📷</div>
-<div class="msg">Point your camera at the customer QR code</div>
+<div class="msg" id="scan-msg">Point camera at customer QR code</div>
+</div>
+<div class="upload-section">
+<p>Camera not working? Let the customer screenshot their QR code and:</p>
+<button class="btn-upload" onclick="document.getElementById('file-input').click()">📸 Upload QR Screenshot</button>
+<input type="file" id="file-input" accept="image/*" capture="environment" onchange="handleFileUpload(event)">
+<br><br>
+<button class="btn-upload-alt" onclick="document.getElementById('file-input2').click()">📁 Choose from Photos</button>
+<input type="file" id="file-input2" accept="image/*" onchange="handleFileUpload(event)" style="display:none;">
 </div>
 <div class="found-card" id="scan-found"></div>
 </div>
@@ -131,34 +164,126 @@ body{font-family:Arial,sans-serif;background:#004837;color:#FFFFFF;min-height:10
 </div>
 </div>
 <div class="toast" id="toast"></div>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 var TOTAL=3;
 var REWARDS=[{id:"r1",icon:"💆‍♀️",title:"Free Keratin Treatment",desc:"A full keratin smoothing treatment"},{id:"r2",icon:"✨",title:"Free Braids",desc:"Complimentary braiding session"},{id:"r3",icon:"🧴",title:"Product Gift",desc:"Pick a free hair care product"},{id:"r4",icon:"💧",title:"Free Deep Conditioning",desc:"Premium deep conditioning treatment"},{id:"r5",icon:"🎁",title:"Surprise!",desc:"A mystery reward"}];
 var scanning=false,lastScannedId="",lastScanTime=0;
+var video,canvas,ctx;
+
 function getDB(){var r=localStorage.getItem("loyalty_db");return r?JSON.parse(r):{customers:{}};}
 function saveDB(db){localStorage.setItem("loyalty_db",JSON.stringify(db));}
 function getCustomer(id){return getDB().customers[id]||null;}
 function saveCustomer(c){var db=getDB();db.customers[c.id]=c;saveDB(db);updateLeaderboard(c);}
 function updateLeaderboard(c){var lb=JSON.parse(localStorage.getItem("glowcard_leaderboard")||"{}");lb[c.id]={name:c.name,visits:c.visits,totalRewards:c.totalRewards,lastActive:Date.now()};localStorage.setItem("glowcard_leaderboard",JSON.stringify(lb));}
+
 function checkPin(){var pin=document.getElementById("pinInput").value.trim();if(pin.length<4)return;var stored=localStorage.getItem("admin_pin");if(!stored){localStorage.setItem("admin_pin",pin);unlock();}else if(pin===stored){unlock();}else{toast("Wrong PIN","error");document.getElementById("pinInput").value="";}}
 function unlock(){document.getElementById("pin-overlay").classList.add("hidden");initScanner();}
 window.addEventListener("DOMContentLoaded",function(){if(localStorage.getItem("admin_pin"))document.getElementById("pin-note").style.display="none";document.getElementById("pinInput").addEventListener("keydown",function(e){if(e.key==="Enter")checkPin();});});
+
 function switchTab(t){var tabs=["scan","manual","list","analytics"];document.querySelectorAll(".mode-tab").forEach(function(b,i){b.classList.toggle("active",tabs[i]===t)});document.querySelectorAll(".panel").forEach(function(p){p.classList.remove("active")});document.getElementById("panel-"+t).classList.add("active");if(t==="scan")startScanner();else stopScanner();if(t==="list")renderList();if(t==="analytics")renderAnalytics();}
-function initScanner(){startScanner();}
-function startScanner(){if(scanning)return;var v=document.getElementById("scanner-video");navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}}).then(function(stream){v.srcObject=stream;scanning=true;requestAnimationFrame(scanLoop);}).catch(function(){document.getElementById("scan-status").innerHTML='<div class="icon">⚠️</div><div class="msg">Camera denied. Use Manual tab instead.</div>';});}
-function stopScanner(){scanning=false;var v=document.getElementById("scanner-video");if(v.srcObject){v.srcObject.getTracks().forEach(function(t){t.stop()});v.srcObject=null;}}
-var barcodeDetector=null;if("BarcodeDetector" in window)barcodeDetector=new BarcodeDetector({formats:["qr_code"]});
-function scanLoop(){if(!scanning)return;var v=document.getElementById("scanner-video");if(barcodeDetector&&v.readyState>=2){barcodeDetector.detect(v).then(function(codes){if(codes.length>0)handleScan(codes[0].rawValue);}).catch(function(){});}requestAnimationFrame(scanLoop);}
-function handleScan(raw){if(raw===lastScannedId&&(Date.now()-lastScanTime)<5000)return;try{var data=JSON.parse(raw);if(!data.id||!data.token){toast("Invalid QR","error");return;}var epoch30=Math.floor(Date.now()/30000);var valid=[btoa(data.id+"|"+epoch30),btoa(data.id+"|"+(epoch30-1))];if(valid.indexOf(data.token)===-1){toast("QR expired. Ask customer to refresh.","warning");return;}lastScannedId=raw;lastScanTime=Date.now();var customer=getCustomer(data.id);if(!customer)customer={id:data.id,name:data.name,visits:0,totalRewards:0,rewardHistory:[]};showFoundCard("scan-found",customer);}catch(e){toast("Could not read QR","error");}}
+
+function initScanner(){
+  video=document.getElementById("scanner-video");
+  canvas=document.getElementById("scanner-canvas");
+  ctx=canvas.getContext("2d",{willReadFrequently:true});
+  startScanner();
+}
+
+function startScanner(){
+  if(scanning)return;
+  video=document.getElementById("scanner-video");
+  canvas=document.getElementById("scanner-canvas");
+  ctx=canvas.getContext("2d",{willReadFrequently:true});
+  navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:640},height:{ideal:480}}}).then(function(stream){
+    video.srcObject=stream;
+    video.setAttribute("playsinline",true);
+    video.play();
+    scanning=true;
+    requestAnimationFrame(scanFrame);
+  }).catch(function(){
+    document.getElementById("scan-status").innerHTML='<div class="icon">⚠️</div><div class="msg">Camera denied. Use Upload or Manual tab instead.</div>';
+  });
+}
+
+function stopScanner(){
+  scanning=false;
+  if(video&&video.srcObject){video.srcObject.getTracks().forEach(function(t){t.stop()});video.srcObject=null;}
+}
+
+function scanFrame(){
+  if(!scanning)return;
+  if(video.readyState===video.HAVE_ENOUGH_DATA){
+    canvas.width=video.videoWidth;
+    canvas.height=video.videoHeight;
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    var imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
+    if(typeof jsQR!=="undefined"){
+      var code=jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:"dontInvert"});
+      if(code){
+        handleScan(code.data);
+      }
+    }
+  }
+  requestAnimationFrame(scanFrame);
+}
+
+function handleFileUpload(event){
+  var file=event.target.files[0];
+  if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var img=new Image();
+    img.onload=function(){
+      var c=document.createElement("canvas");
+      c.width=img.width;c.height=img.height;
+      var cx=c.getContext("2d");
+      cx.drawImage(img,0,0);
+      var imageData=cx.getImageData(0,0,c.width,c.height);
+      if(typeof jsQR!=="undefined"){
+        var code=jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:"attemptBoth"});
+        if(code){handleScan(code.data);}
+        else{toast("No QR code found in image. Try again.","error");}
+      }else{toast("Scanner loading. Try again in a moment.","warning");}
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);
+  event.target.value="";
+}
+
+function handleScan(raw){
+  if(raw===lastScannedId&&(Date.now()-lastScanTime)<5000)return;
+  try{
+    var data=JSON.parse(raw);
+    if(!data.id||!data.token){toast("Invalid QR","error");return;}
+    var epoch30=Math.floor(Date.now()/30000);
+    var valid=[btoa(data.id+"|"+epoch30),btoa(data.id+"|"+(epoch30-1)),btoa(data.id+"|"+(epoch30+1))];
+    if(valid.indexOf(data.token)===-1){toast("QR expired. Ask customer to refresh.","warning");return;}
+    lastScannedId=raw;lastScanTime=Date.now();
+    var customer=getCustomer(data.id);
+    if(!customer)customer={id:data.id,name:data.name,visits:0,totalRewards:0,rewardHistory:[]};
+    saveCustomer(customer);
+    document.getElementById("scan-msg").textContent="✅ Found: "+customer.name;
+    showFoundCard("scan-found",customer);
+    toast("Customer found: "+customer.name,"success");
+  }catch(e){toast("Could not read QR","error");}
+}
+
 function manualLookup(){var q=document.getElementById("manual-id").value.trim();if(!q)return;var db=getDB();var customer=db.customers[q.toUpperCase()]||null;if(!customer){var lower=q.toLowerCase();var keys=Object.keys(db.customers);for(var i=0;i<keys.length;i++){var c=db.customers[keys[i]];if(c.name.toLowerCase().indexOf(lower)!==-1){customer=c;break;}}}if(!customer){toast("Customer not found","error");return;}showFoundCard("manual-found",customer);}
+
 function showFoundCard(containerId,customer){var el=document.getElementById(containerId);var left=Math.max(0,TOTAL-customer.visits);var full=customer.visits>=TOTAL;var stamps="";for(var i=1;i<=TOTAL;i++){var isFilled=i<=customer.visits;var isLast=i===TOTAL;var cls="mini-stamp"+(isFilled?" filled":"")+(isLast?" reward-slot":"");var icon=isFilled?"✂️":(isLast?"🎁":"💈");stamps+='<div class="'+cls+'">'+icon+"</div>";}var rewardHTML="";var custApp=localStorage.getItem("loyalty_customer");if(custApp){var ca=JSON.parse(custApp);if(ca.id===customer.id&&ca.rewardHistory&&ca.rewardHistory.length>0){var latest=ca.rewardHistory[0];rewardHTML='<div class="chosen-reward"><div class="cr-icon">'+latest.icon+'</div><div><div class="cr-title">Chose: '+latest.reward+'</div><div class="cr-desc">Customer selected this reward</div></div></div>';}}var historyHTML="";if(customer.rewardHistory&&customer.rewardHistory.length>0){var recent=customer.rewardHistory.slice(0,3);historyHTML='<div style="margin-top:12px;text-align:left;font-size:12px;opacity:.5;font-weight:600;">Recent rewards:</div>';for(var j=0;j<recent.length;j++){historyHTML+='<div style="font-size:12px;opacity:.45;padding:4px 0;">'+recent[j].icon+" "+recent[j].reward+" - "+recent[j].date+"</div>";}}el.innerHTML='<div class="found-name">'+customer.name+' 💈</div><div class="found-id">'+customer.id+'</div><div class="found-visits"><div class="fv-box"><div class="num">'+customer.visits+'</div><div class="lbl">Visits</div></div><div class="fv-box"><div class="num">'+left+'</div><div class="lbl">Left</div></div><div class="fv-box"><div class="num">'+customer.totalRewards+'</div><div class="lbl">Rewards</div></div></div><div class="stamp-row">'+stamps+"</div>"+rewardHTML+(full?'<button class="btn-add btn-reward" onclick="grantReward(\''+customer.id+"','"+containerId+"')\">🎉 Grant Reward</button>":'<button class="btn-add" onclick="addVisit(\''+customer.id+"','"+containerId+"')\">+ Add Visit</button>")+'<button class="btn-remove" onclick="removeVisit(\''+customer.id+"','"+containerId+"')\">- Remove Last Visit</button>"+'<button class="btn-secondary" onclick="resetCard(\''+customer.id+"','"+containerId+"')\">Reset Card to 0</button>"+historyHTML;el.classList.add("show");}
-function addVisit(id,container){var c=getCustomer(id);if(!c)return;if(c.visits>=TOTAL){toast("Card full. Grant reward first.","warning");return;}c.visits++;saveCustomer(c);showFoundCard(container,c);toast("Visit "+c.visits+" added for "+c.name+"!","success");syncToCustomerApp(c);}
+
+function addVisit(id,container){var c=getCustomer(id);if(!c)return;if(c.visits>=TOTAL){toast("Card full. Grant reward first.","warning");return;}c.visits++;saveCustomer(c);showFoundCard(container,c);toast("✂️ Visit "+c.visits+" added for "+c.name+"!","success");syncToCustomerApp(c);}
 function removeVisit(id,container){var c=getCustomer(id);if(!c||c.visits<=0){toast("No visits to remove","warning");return;}c.visits--;saveCustomer(c);showFoundCard(container,c);toast("Visit removed","error");syncToCustomerApp(c);}
 function grantReward(id,container){var c=getCustomer(id);if(!c)return;var rewardTitle="Reward",rewardIcon="🎁";var custApp=localStorage.getItem("loyalty_customer");if(custApp){var ca=JSON.parse(custApp);if(ca.id===c.id&&ca.rewardHistory&&ca.rewardHistory.length>0){rewardTitle=ca.rewardHistory[0].reward;rewardIcon=ca.rewardHistory[0].icon;}}if(!c.rewardHistory)c.rewardHistory=[];c.visits=0;c.totalRewards++;c.rewardHistory.unshift({reward:rewardTitle,icon:rewardIcon,date:new Date().toLocaleDateString()});saveCustomer(c);showFoundCard(container,c);toast("Reward granted to "+c.name+"!","success");syncToCustomerApp(c);}
 function resetCard(id,container){if(!confirm("Reset this card to 0 visits?"))return;var c=getCustomer(id);if(!c)return;c.visits=0;saveCustomer(c);showFoundCard(container,c);toast("Card reset","warning");syncToCustomerApp(c);}
 function syncToCustomerApp(c){var raw=localStorage.getItem("loyalty_customer");if(raw){var ex=JSON.parse(raw);if(ex.id===c.id){ex.visits=c.visits;ex.totalRewards=c.totalRewards;localStorage.setItem("loyalty_customer",JSON.stringify(ex));}}}
+
 function renderList(){var db=getDB();var list=Object.values(db.customers);var el=document.getElementById("customer-list");if(list.length===0){el.innerHTML='<div class="empty-msg">No customers yet. Scan a QR to add the first one! 💈</div>';return;}list.sort(function(a,b){return(b.totalRewards-a.totalRewards)||(b.visits-a.visits);});el.innerHTML=list.map(function(c){return '<div class="customer-item" onclick="switchTab(\'manual\');document.getElementById(\'manual-id\').value=\''+c.id+"';manualLookup();\"><div><div class=\"ci-name\">"+c.name+"</div><div class=\"ci-id\">"+c.id+"</div></div><div class=\"ci-meta\"><span class=\"ci-rewards\">"+c.totalRewards+"🎁</span><span class=\"ci-visits\">"+c.visits+" / "+TOTAL+"</span></div></div>";}).join("");}
+
 function renderAnalytics(){var db=getDB();var list=Object.values(db.customers);var el=document.getElementById("analytics-content");var totalCustomers=list.length;var totalVisitsAll=list.reduce(function(s,c){return s+c.visits+(c.totalRewards||0)*TOTAL;},0);var totalRewardsAll=list.reduce(function(s,c){return s+(c.totalRewards||0);},0);var activeNow=list.filter(function(c){return c.visits>0;}).length;var avgVisits=totalCustomers?((list.reduce(function(s,c){return s+c.visits;},0))/totalCustomers).toFixed(1):"0";var fullCards=list.filter(function(c){return c.visits>=TOTAL;}).length;var rewardCounts={};list.forEach(function(c){if(c.rewardHistory){c.rewardHistory.forEach(function(h){rewardCounts[h.reward]=(rewardCounts[h.reward]||0)+1;});}});var rewardsSorted=Object.entries(rewardCounts).sort(function(a,b){return b[1]-a[1];});var maxRC=rewardsSorted.length>0?rewardsSorted[0][1]:1;var colors=["#5FF49A","#5EB5EC","#49AB8E","#FD7E8B","#5789AC"];var rewardsHTML="";if(rewardsSorted.length>0){rewardsHTML='<div class="popular-rewards"><h4>🎁 Most Popular Rewards</h4>'+rewardsSorted.map(function(r,i){var pct=Math.round((r[1]/maxRC)*100);return '<div class="pr-row"><span class="pr-label">'+r[0]+'</span><div class="pr-bar-bg"><div class="pr-bar-fill" style="width:'+pct+"%;background:"+colors[i%colors.length]+'"></div></div><span class="pr-count">'+r[1]+"</span></div>";}).join("")+"</div>";}el.innerHTML='<h3>📊 GlowCard Analytics</h3><div class="a-grid"><div class="a-box"><div class="a-num">'+totalCustomers+'</div><div class="a-label">Total Clients</div></div><div class="a-box"><div class="a-num">'+activeNow+'</div><div class="a-label">Active Cards</div></div><div class="a-box"><div class="a-num">'+totalRewardsAll+'</div><div class="a-label">Rewards Given</div></div><div class="a-box"><div class="a-num">'+fullCards+'</div><div class="a-label">Ready to Claim</div></div><div class="a-box"><div class="a-num">'+avgVisits+'</div><div class="a-label">Avg Visits / Client</div></div><div class="a-box"><div class="a-num">'+totalVisitsAll+'</div><div class="a-label">Total Visits Ever</div></div></div>'+rewardsHTML;}
+
 function toast(msg,type){var el=document.getElementById("toast");el.textContent=msg;el.className="toast "+type+" show";setTimeout(function(){el.classList.remove("show");},2500);}
 </script>
 </body>
